@@ -13,7 +13,7 @@ MODEL_WIDTH, PORT_RADIUS = 220, 7
 DATA_TYPES = ["Image", "Segmentation", "Spatial location", "Volume", "Scalar", "Table", "Any"]
 
 DEFAULT_MODELS = [
-    {"name": "nnU-Net v2", "inputs": ["Image"], "outputs": ["Segmentation"]},
+    {"name": "nnU-Net v2", "inputs": ["Image"], "outputs": ["Segmentation", "Segmentation"]},
     {"name": "MONAI Model", "inputs": ["Image"], "outputs": ["Segmentation"]},
     {"name": "Measurement Model", "inputs": ["Segmentation"], "outputs": ["Volume"]},
 ]
@@ -135,13 +135,40 @@ class PipelineScene(QGraphicsScene):
     @staticmethod
     def matches(actual,required): return actual==required or actual=="Any" or required=="Any"
 
+    def choose_port(self, model, kind, required_type):
+        ports = model.outputs if kind == "output" else model.inputs
+        compatible = [p for p in ports if self.matches(p.data_type, required_type)]
+        if not compatible:
+            QMessageBox.warning(None, "No compatible port",
+                f"{model.definition['name']} has no {kind} compatible with {required_type}.")
+            return None
+        if len(compatible) == 1:
+            return compatible[0]
+        labels = []
+        for p in compatible:
+            number = ports.index(p) + 1
+            labels.append(f"{kind.title()} {number}: {p.data_type}")
+        choice, ok = QInputDialog.getItem(None, f"Choose {kind}",
+            f"{model.definition['name']} has multiple compatible {kind}s. Choose one:",
+            labels, 0, False)
+        return compatible[labels.index(choice)] if ok else None
+
     def begin_connection(self,port,pos):
         self.cancel_pending()
-        if not self.matches(port.data_type,self.active_plugin["from"]):
-            QMessageBox.warning(None,"Incompatible plugin",
-                f"{self.active_plugin['name']} requires a {self.active_plugin['from']} output, "
-                f"but this port produces {port.data_type}.")
-            return
+        required = self.active_plugin["from"]
+        if not self.matches(port.data_type, required):
+            chosen = self.choose_port(port.parent_model, "output", required)
+            if chosen is None:
+                return
+            port = chosen
+        else:
+            same_type = [p for p in port.parent_model.outputs
+                         if self.matches(p.data_type, required)]
+            if len(same_type) > 1:
+                chosen = self.choose_port(port.parent_model, "output", required)
+                if chosen is None:
+                    return
+                port = chosen
         self.pending=ConnectionItem(port,plugin=self.active_plugin.copy())
         self.addItem(self.pending); self.pending.set_preview_end(pos)
 
@@ -157,13 +184,24 @@ class PipelineScene(QGraphicsScene):
             target=next((i for i in self.items(e.scenePos()) if isinstance(i,PortItem) and i.kind=="input"),None)
             if target and target.parent_model is not self.pending.source_port.parent_model:
                 required=self.pending.plugin["to"]
-                if self.matches(target.data_type,required):
-                    self.pending.attach_target(target); self.pending=None
-                else:
+                model=target.parent_model
+                compatible=[p for p in model.inputs if self.matches(p.data_type,required)]
+                if not compatible:
                     QMessageBox.warning(None,"Incompatible input",
                         f"{self.pending.plugin['name']} produces {required}, "
-                        f"but this model input expects {target.data_type}.")
+                        f"but {model.definition['name']} has no compatible input.")
                     self.cancel_pending()
+                else:
+                    # The drop identifies the model; when several ports accept the same
+                    # type, explicitly ask which semantic input slot the plugin feeds.
+                    if len(compatible)>1:
+                        chosen=self.choose_port(model,"input",required)
+                        if chosen is None:
+                            self.cancel_pending(); e.accept(); return
+                        target=chosen
+                    elif not self.matches(target.data_type,required):
+                        target=compatible[0]
+                    self.pending.attach_target(target); self.pending=None
             else: self.cancel_pending()
             e.accept(); return
         super().mouseReleaseEvent(e)
