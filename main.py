@@ -286,6 +286,46 @@ class PipelineScene(QGraphicsScene):
             })
         return json.dumps(graph,indent=2)
 
+    def relationship_qbasic(self):
+        connections=[i for i in self.items() if isinstance(i,ConnectionItem) and i.target_port]
+        lines=[
+            "' Diagram Connect - QBasic-style pipeline description",
+            "' Generated from the current visual graph",
+            "",
+            "CLS",
+            'PRINT "AI PIPELINE"',
+            ""
+        ]
+        if not connections:
+            lines.append("' No completed connections.")
+            lines.append("END")
+            return "\n".join(lines)
+        for n,conn in enumerate(reversed(connections),1):
+            src=conn.source_port.parent_model
+            dst=conn.target_port.parent_model
+            src_no=src.outputs.index(conn.source_port)+1
+            dst_no=dst.inputs.index(conn.target_port)+1
+            safe=lambda s: str(s).replace('"', "''")
+            lines.extend([
+                f"' ----- CONNECTION {n} -----",
+                f'SOURCE_MODEL$ = "{safe(src.definition["name"])}"',
+                f'SOURCE_OUTPUT% = {src_no}',
+                f'SOURCE_TYPE$ = "{safe(conn.source_port.data_type)}"',
+                f'PLUGIN$ = "{safe(conn.plugin["name"])}"',
+                f'PLUGIN_INPUT$ = "{safe(conn.plugin_input)}"',
+                f'PLUGIN_OUTPUT$ = "{safe(conn.plugin_output)}"',
+                f'RECEIVER_MODEL$ = "{safe(dst.definition["name"])}"',
+                f'RECEIVER_INPUT% = {dst_no}',
+                f'RECEIVER_TYPE$ = "{safe(conn.target_port.data_type)}"',
+                'PRINT SOURCE_MODEL$; " OUT"; SOURCE_OUTPUT%; " ["; SOURCE_TYPE$; "]"',
+                'PRINT "  -> "; PLUGIN$; " ("; PLUGIN_INPUT$; " -> "; PLUGIN_OUTPUT$; ")"',
+                'PRINT "  -> "; RECEIVER_MODEL$; " IN"; RECEIVER_INPUT%; " ["; RECEIVER_TYPE$; "]"',
+                "PRINT",
+                ""
+            ])
+        lines.append("END")
+        return "\n".join(lines)
+
 
 class PipelineView(QGraphicsView):
     def __init__(self,scene):
@@ -365,6 +405,7 @@ class MainWindow(QMainWindow):
         tb.addSeparator()
         a=QAction("Explain relationships",self); a.triggered.connect(self.show_relationships); tb.addAction(a)
         a=QAction("Show relationship code",self); a.triggered.connect(self.show_relationship_code); tb.addAction(a)
+        a=QAction("Show QBasic",self); a.triggered.connect(self.show_qbasic_code); tb.addAction(a)
         self.build_demo()
 
     def show_relationships(self):
@@ -389,6 +430,26 @@ class MainWindow(QMainWindow):
         editor=QPlainTextEdit()
         editor.setReadOnly(True)
         editor.setPlainText(self.scene.relationship_code())
+        editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        layout.addWidget(editor)
+        buttons=QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def show_qbasic_code(self):
+        dialog=QDialog(self)
+        dialog.setWindowTitle("Pipeline — QBasic")
+        dialog.resize(820,620)
+        layout=QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            "QBasic-style representation of the current model → plugin → model relationships:"
+        ))
+        from PySide6.QtWidgets import QPlainTextEdit
+        editor=QPlainTextEdit()
+        editor.setReadOnly(True)
+        editor.setPlainText(self.scene.relationship_qbasic())
         editor.setLineWrapMode(QPlainTextEdit.NoWrap)
         layout.addWidget(editor)
         buttons=QDialogButtonBox(QDialogButtonBox.Close)
