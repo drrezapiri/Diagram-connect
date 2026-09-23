@@ -1,6 +1,6 @@
 import sys
 import json
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QAction, QBrush, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QDockWidget,
@@ -397,6 +397,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__(); self.setWindowTitle("Diagram Connect — Typed AI Pipeline Mock-up"); self.resize(1350,820)
         self.scene=PipelineScene(self); self.view=PipelineView(self.scene); self.setCentralWidget(self.view)
+        self.live_code_dialogs=[]
         dock=QDockWidget("Pipeline Library",self); self.library=LibraryPanel(self); dock.setWidget(self.library)
         dock.setMinimumWidth(360); self.addDockWidget(Qt.LeftDockWidgetArea,dock)
         tb=QToolBar("Pipeline"); tb.setMovable(False); self.addToolBar(tb)
@@ -418,45 +419,54 @@ class MainWindow(QMainWindow):
         box.setMinimumWidth(650)
         box.exec()
 
-    def show_relationship_code(self):
+    def make_live_code_dialog(self,title,label_text,generator):
         dialog=QDialog(self)
-        dialog.setWindowTitle("Pipeline Relationship Code")
-        dialog.resize(760,600)
-        layout=QVBoxLayout(dialog)
-        layout.addWidget(QLabel(
-            "Machine-readable JSON representation of the current model → plugin → model relationships:"
-        ))
-        from PySide6.QtWidgets import QPlainTextEdit
-        editor=QPlainTextEdit()
-        editor.setReadOnly(True)
-        editor.setPlainText(self.scene.relationship_code())
-        editor.setLineWrapMode(QPlainTextEdit.NoWrap)
-        layout.addWidget(editor)
-        buttons=QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(dialog.reject)
-        buttons.clicked.connect(dialog.accept)
-        layout.addWidget(buttons)
-        dialog.exec()
-
-    def show_qbasic_code(self):
-        dialog=QDialog(self)
-        dialog.setWindowTitle("Pipeline — QBasic")
+        dialog.setWindowTitle(title)
         dialog.resize(820,620)
         layout=QVBoxLayout(dialog)
-        layout.addWidget(QLabel(
-            "QBasic-style representation of the current model → plugin → model relationships:"
-        ))
+        layout.addWidget(QLabel(label_text+"  (live)"))
         from PySide6.QtWidgets import QPlainTextEdit
         editor=QPlainTextEdit()
         editor.setReadOnly(True)
-        editor.setPlainText(self.scene.relationship_qbasic())
         editor.setLineWrapMode(QPlainTextEdit.NoWrap)
         layout.addWidget(editor)
         buttons=QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(dialog.reject)
-        buttons.clicked.connect(dialog.accept)
+        buttons.rejected.connect(dialog.close)
+        buttons.clicked.connect(dialog.close)
         layout.addWidget(buttons)
-        dialog.exec()
+        timer=QTimer(dialog)
+        timer.setInterval(200)
+        last={"text":None}
+        def refresh():
+            text=generator()
+            if text != last["text"]:
+                cursor=editor.textCursor()
+                position=cursor.position()
+                editor.setPlainText(text)
+                cursor=editor.textCursor()
+                cursor.setPosition(min(position,len(text)))
+                editor.setTextCursor(cursor)
+                last["text"]=text
+        timer.timeout.connect(refresh)
+        refresh(); timer.start()
+        dialog.setModal(False)
+        dialog.show()
+        self.live_code_dialogs.append(dialog)
+        dialog.finished.connect(lambda _=0,d=dialog: self.live_code_dialogs.remove(d) if d in self.live_code_dialogs else None)
+
+    def show_relationship_code(self):
+        self.make_live_code_dialog(
+            "Pipeline Relationship Code",
+            "Machine-readable JSON representation of the current model → plugin → model relationships:",
+            self.scene.relationship_code,
+        )
+
+    def show_qbasic_code(self):
+        self.make_live_code_dialog(
+            "Pipeline — QBasic",
+            "QBasic-style representation of the current model → plugin → model relationships:",
+            self.scene.relationship_qbasic,
+        )
 
     def add_named_model(self,d):
         center=self.view.mapToScene(self.view.viewport().rect().center())
