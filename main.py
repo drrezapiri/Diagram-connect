@@ -236,6 +236,30 @@ class PipelineScene(QGraphicsScene):
                 for c in i.all_connections(): c.detach()
                 self.removeItem(i)
 
+    def relationship_summary(self):
+        connections=[i for i in self.items() if isinstance(i,ConnectionItem) and i.target_port]
+        if not connections:
+            return ("No completed model-plugin-model relationships exist on the canvas yet.\n\n"
+                    "A relationship is: source model output → plugin input → plugin output → receiver model input.")
+        lines=[]
+        for n,conn in enumerate(reversed(connections),1):
+            src=conn.source_port.parent_model
+            dst=conn.target_port.parent_model
+            src_no=src.outputs.index(conn.source_port)+1
+            dst_no=dst.inputs.index(conn.target_port)+1
+            lines.append(
+                f"{n}. {src.definition['name']}\n"
+                f"   Output {src_no}: {conn.source_port.data_type}\n"
+                f"      ↓\n"
+                f"   Plugin: {conn.plugin['name']}\n"
+                f"   Plugin input: {conn.plugin_input}\n"
+                f"   Plugin output: {conn.plugin_output}\n"
+                f"      ↓\n"
+                f"   {dst.definition['name']}\n"
+                f"   Input {dst_no}: {conn.target_port.data_type}"
+            )
+        return "\n\n".join(lines)
+
 
 class PipelineView(QGraphicsView):
     def __init__(self,scene):
@@ -312,7 +336,19 @@ class MainWindow(QMainWindow):
         tb=QToolBar("Pipeline"); tb.setMovable(False); self.addToolBar(tb)
         a=QAction("Delete selected",self); a.triggered.connect(self.scene.delete_selected); tb.addAction(a)
         a=QAction("Clear canvas",self); a.triggered.connect(self.scene.clear); tb.addAction(a)
+        tb.addSeparator()
+        a=QAction("Explain relationships",self); a.triggered.connect(self.show_relationships); tb.addAction(a)
         self.build_demo()
+
+    def show_relationships(self):
+        box=QMessageBox(self)
+        box.setWindowTitle("Model ↔ Plugin Relationships")
+        box.setIcon(QMessageBox.Information)
+        box.setText("How the current pipeline is connected")
+        box.setInformativeText(self.scene.relationship_summary())
+        box.setStandardButtons(QMessageBox.Ok)
+        box.setMinimumWidth(650)
+        box.exec()
 
     def add_named_model(self,d):
         center=self.view.mapToScene(self.view.viewport().rect().center())
