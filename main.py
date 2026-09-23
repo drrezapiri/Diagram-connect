@@ -216,10 +216,12 @@ class PipelineScene(QGraphicsScene):
         compatible_inputs=[t for t in inputs if self.matches(port.data_type,t)]
         if not compatible_inputs:
             QMessageBox.warning(None,"Incompatible plugin",
-                f"{plugin['name']} has no input compatible with model output {port.data_type}.")
+                f"{plugin['name']} has no input compatible with {port.data_type}.")
             return
+        # The exact model/dataset output is already known from the node the user clicked.
+        # Only ask when the plugin itself has multiple compatible input sockets.
         if len(compatible_inputs)>1:
-            labels=[f"Input {i+1}: {t}" for i,t in enumerate(compatible_inputs)]
+            labels=[f"Plugin input {i+1}: {t}" for i,t in enumerate(compatible_inputs)]
             choice,ok=QInputDialog.getItem(None,"Choose plugin input",
                 f"Which input of {plugin['name']} should receive {port.data_type}?",
                 labels,0,False)
@@ -227,17 +229,18 @@ class PipelineScene(QGraphicsScene):
             plugin["selected_input"]=compatible_inputs[labels.index(choice)]
         else:
             plugin["selected_input"]=compatible_inputs[0]
+
         outputs=plugin.get("outputs",["Any"])
         if len(outputs)>1:
-            labels=[f"Output {i+1}: {t}" for i,t in enumerate(outputs)]
+            labels=[f"Plugin output {i+1}: {t}" for i,t in enumerate(outputs)]
             choice,ok=QInputDialog.getItem(None,"Choose plugin output",
-                f"Which output of {plugin['name']} should this connection use?",
+                f"Which output of {plugin['name']} should this arrow carry?",
                 labels,0,False)
-            if not ok:
-                return
+            if not ok: return
             plugin["selected_output"]=outputs[labels.index(choice)]
         else:
             plugin["selected_output"]=outputs[0]
+
         self.pending=ConnectionItem(port,plugin=plugin)
         self.addItem(self.pending); self.pending.set_preview_end(pos)
 
@@ -250,34 +253,20 @@ class PipelineScene(QGraphicsScene):
 
     def mouseReleaseEvent(self,e):
         if self.pending:
-            target=next((i for i in self.items(e.scenePos()) if isinstance(i,PortItem) and i.kind=="input"),None)
+            target=next((i for i in self.items(e.scenePos())
+                         if isinstance(i,PortItem) and i.kind=="input"),None)
             if target and target.parent_model is not self.pending.source_port.parent_model:
                 required=self.pending.plugin_output
-                model=target.parent_model
-                compatible=[p for p in model.inputs if self.matches(p.data_type,required)]
-                if not compatible:
+                if self.matches(target.data_type,required):
+                    # The exact receiver input is the node where the user released the arrow.
+                    self.pending.attach_target(target); self.pending=None
+                else:
                     QMessageBox.warning(None,"Incompatible input",
                         f"{self.pending.plugin['name']} produces {required}, "
-                        f"but {model.definition['name']} has no compatible input.")
+                        f"but the selected input node expects {target.data_type}.")
                     self.cancel_pending()
-                else:
-                    # Finishing a plugin on a receiver model always confirms the exact
-                    # receiving input slot. This remains explicit even when only one
-                    # compatible input currently exists.
-                    labels=[]
-                    for p in compatible:
-                        number=model.inputs.index(p)+1
-                        labels.append(f"Input {number}: {p.data_type}")
-                    choice,ok=QInputDialog.getItem(
-                        None,"Choose receiver input",
-                        f"Which input of {model.definition['name']} should receive "
-                        f"{self.pending.plugin['name']}?",
-                        labels,0,False)
-                    if not ok:
-                        self.cancel_pending(); e.accept(); return
-                    target=compatible[labels.index(choice)]
-                    self.pending.attach_target(target); self.pending=None
-            else: self.cancel_pending()
+            else:
+                self.cancel_pending()
             e.accept(); return
         super().mouseReleaseEvent(e)
 
