@@ -18,10 +18,10 @@ DEFAULT_MODELS = [
     {"name": "Measurement Model", "inputs": ["Segmentation"], "outputs": ["Volume"]},
 ]
 DEFAULT_PLUGINS = [
-    {"name": "Direct image", "from": "Image", "to": "Image", "color": "#6b93ff"},
-    {"name": "Direct segmentation", "from": "Segmentation", "to": "Segmentation", "color": "#2bcbba"},
-    {"name": "Spatial locator", "from": "Segmentation", "to": "Spatial location", "color": "#e056fd"},
-    {"name": "Volume extractor", "from": "Segmentation", "to": "Volume", "color": "#ff9f43"},
+    {"name": "Direct image", "from": "Image", "outputs": ["Image"], "color": "#6b93ff"},
+    {"name": "Direct segmentation", "from": "Segmentation", "outputs": ["Segmentation"], "color": "#2bcbba"},
+    {"name": "Spatial locator", "from": "Segmentation", "outputs": ["Spatial location"], "color": "#e056fd"},
+    {"name": "Volume extractor", "from": "Segmentation", "outputs": ["Volume"], "color": "#ff9f43"},
 ]
 
 
@@ -57,7 +57,8 @@ class ConnectionItem(QGraphicsPathItem):
     def __init__(self, source, target=None, plugin=None):
         super().__init__()
         self.source_port, self.target_port = source, target
-        self.plugin = plugin or {"name":"Direct", "from":"Any", "to":"Any", "color":"#6b93ff"}
+        self.plugin = plugin or {"name":"Direct", "from":"Any", "outputs":["Any"], "color":"#6b93ff"}
+        self.plugin_output = self.plugin.get("selected_output") or self.plugin.get("outputs", ["Any"])[0]
         self.preview_end = None
         self.setZValue(-1); self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         source.connections.append(self)
@@ -66,7 +67,7 @@ class ConnectionItem(QGraphicsPathItem):
 
     def description(self):
         p=self.plugin
-        return f"{p['name']}: {p['from']} → {p['to']}"
+        return f"{p['name']}: {p['from']} → {self.plugin_output}"
 
     def set_preview_end(self, p): self.preview_end=p; self.update_path()
 
@@ -169,7 +170,19 @@ class PipelineScene(QGraphicsScene):
                 if chosen is None:
                     return
                 port = chosen
-        self.pending=ConnectionItem(port,plugin=self.active_plugin.copy())
+        plugin=self.active_plugin.copy()
+        outputs=plugin.get("outputs",["Any"])
+        if len(outputs)>1:
+            labels=[f"Output {i+1}: {t}" for i,t in enumerate(outputs)]
+            choice,ok=QInputDialog.getItem(None,"Choose plugin output",
+                f"Which output of {plugin['name']} should this connection use?",
+                labels,0,False)
+            if not ok:
+                return
+            plugin["selected_output"]=outputs[labels.index(choice)]
+        else:
+            plugin["selected_output"]=outputs[0]
+        self.pending=ConnectionItem(port,plugin=plugin)
         self.addItem(self.pending); self.pending.set_preview_end(pos)
 
     def cancel_pending(self):
@@ -183,7 +196,7 @@ class PipelineScene(QGraphicsScene):
         if self.pending:
             target=next((i for i in self.items(e.scenePos()) if isinstance(i,PortItem) and i.kind=="input"),None)
             if target and target.parent_model is not self.pending.source_port.parent_model:
-                required=self.pending.plugin["to"]
+                required=self.pending.plugin_output
                 model=target.parent_model
                 compatible=[p for p in model.inputs if self.matches(p.data_type,required)]
                 if not compatible:
@@ -252,7 +265,7 @@ class LibraryPanel(QWidget):
         item.setData(Qt.UserRole,len(self.model_defs)-1); self.models.addItem(item)
 
     def add_plugin_item(self,d):
-        self.plugin_defs.append(d); item=QListWidgetItem(f"{d['name']}   [{d['from']} → {d['to']}]")
+        self.plugin_defs.append(d); item=QListWidgetItem(f"{d['name']}   [{d['from']} → {', '.join(d['outputs'])}]")
         item.setData(Qt.UserRole,len(self.plugin_defs)-1); item.setForeground(QColor(d["color"])); self.plugins.addItem(item)
 
     @staticmethod
@@ -269,12 +282,12 @@ class LibraryPanel(QWidget):
 
     def define_plugin(self):
         d=DefinitionDialog("Define plugin",[
-            ("name","Plugin name:","New plugin"),("from","Accepts output type:","Segmentation"),
-            ("to","Produces / connects to input type:","Image")],self)
+            ("name","Plugin name:","New plugin"),("from","Accepts model output type:","Segmentation"),
+            ("outputs","Plugin output type(s), comma separated:","Image, Spatial location")],self)
         if d.exec():
             palette=["#45aaf2","#a55eea","#26de81","#fd9644","#fc5c65","#2bcbba"]
             self.add_plugin_item({"name":d.value("name") or "New plugin","from":d.value("from") or "Any",
-                "to":d.value("to") or "Any","color":palette[len(self.plugin_defs)%len(palette)]})
+                "outputs":self.parse_types(d.value("outputs")),"color":palette[len(self.plugin_defs)%len(palette)]})
 
     def place_model(self,item):
         self.window.add_named_model(self.model_defs[item.data(Qt.UserRole)])
@@ -283,7 +296,7 @@ class LibraryPanel(QWidget):
         if current:
             d=self.plugin_defs[current.data(Qt.UserRole)]
             self.window.scene.active_plugin=d
-            self.window.statusBar().showMessage(f"Active plugin: {d['name']} | {d['from']} → {d['to']}")
+            self.window.statusBar().showMessage(f"Active plugin: {d['name']} | {d['from']} → {', '.join(d['outputs'])}")
 
 
 class MainWindow(QMainWindow):
