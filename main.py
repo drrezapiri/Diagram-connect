@@ -18,10 +18,10 @@ DEFAULT_MODELS = [
     {"name": "Measurement Model", "inputs": ["Segmentation"], "outputs": ["Volume"]},
 ]
 DEFAULT_PLUGINS = [
-    {"name": "Direct image", "from": "Image", "outputs": ["Image"], "color": "#6b93ff"},
-    {"name": "Direct segmentation", "from": "Segmentation", "outputs": ["Segmentation"], "color": "#2bcbba"},
-    {"name": "Spatial locator", "from": "Segmentation", "outputs": ["Spatial location"], "color": "#e056fd"},
-    {"name": "Volume extractor", "from": "Segmentation", "outputs": ["Volume"], "color": "#ff9f43"},
+    {"name": "Direct image", "inputs": ["Image"], "outputs": ["Image"], "color": "#6b93ff"},
+    {"name": "Direct segmentation", "inputs": ["Segmentation"], "outputs": ["Segmentation"], "color": "#2bcbba"},
+    {"name": "Spatial locator", "inputs": ["Segmentation"], "outputs": ["Spatial location"], "color": "#e056fd"},
+    {"name": "Volume extractor", "inputs": ["Segmentation"], "outputs": ["Volume"], "color": "#ff9f43"},
 ]
 
 
@@ -57,7 +57,8 @@ class ConnectionItem(QGraphicsPathItem):
     def __init__(self, source, target=None, plugin=None):
         super().__init__()
         self.source_port, self.target_port = source, target
-        self.plugin = plugin or {"name":"Direct", "from":"Any", "outputs":["Any"], "color":"#6b93ff"}
+        self.plugin = plugin or {"name":"Direct", "inputs":["Any"], "outputs":["Any"], "color":"#6b93ff"}
+        self.plugin_input = self.plugin.get("selected_input") or self.plugin.get("inputs", ["Any"])[0]
         self.plugin_output = self.plugin.get("selected_output") or self.plugin.get("outputs", ["Any"])[0]
         self.preview_end = None
         self.setZValue(-1); self.setFlag(QGraphicsItem.ItemIsSelectable, True)
@@ -67,7 +68,7 @@ class ConnectionItem(QGraphicsPathItem):
 
     def description(self):
         p=self.plugin
-        return f"{p['name']}: {p['from']} → {self.plugin_output}"
+        return f"{p['name']}: {self.plugin_input} → {self.plugin_output}"
 
     def set_preview_end(self, p): self.preview_end=p; self.update_path()
 
@@ -156,21 +157,22 @@ class PipelineScene(QGraphicsScene):
 
     def begin_connection(self,port,pos):
         self.cancel_pending()
-        required = self.active_plugin["from"]
-        if not self.matches(port.data_type, required):
-            chosen = self.choose_port(port.parent_model, "output", required)
-            if chosen is None:
-                return
-            port = chosen
-        else:
-            same_type = [p for p in port.parent_model.outputs
-                         if self.matches(p.data_type, required)]
-            if len(same_type) > 1:
-                chosen = self.choose_port(port.parent_model, "output", required)
-                if chosen is None:
-                    return
-                port = chosen
         plugin=self.active_plugin.copy()
+        inputs=plugin.get("inputs",["Any"])
+        compatible_inputs=[t for t in inputs if self.matches(port.data_type,t)]
+        if not compatible_inputs:
+            QMessageBox.warning(None,"Incompatible plugin",
+                f"{plugin['name']} has no input compatible with model output {port.data_type}.")
+            return
+        if len(compatible_inputs)>1:
+            labels=[f"Input {i+1}: {t}" for i,t in enumerate(compatible_inputs)]
+            choice,ok=QInputDialog.getItem(None,"Choose plugin input",
+                f"Which input of {plugin['name']} should receive {port.data_type}?",
+                labels,0,False)
+            if not ok: return
+            plugin["selected_input"]=compatible_inputs[labels.index(choice)]
+        else:
+            plugin["selected_input"]=compatible_inputs[0]
         outputs=plugin.get("outputs",["Any"])
         if len(outputs)>1:
             labels=[f"Output {i+1}: {t}" for i,t in enumerate(outputs)]
@@ -265,7 +267,7 @@ class LibraryPanel(QWidget):
         item.setData(Qt.UserRole,len(self.model_defs)-1); self.models.addItem(item)
 
     def add_plugin_item(self,d):
-        self.plugin_defs.append(d); item=QListWidgetItem(f"{d['name']}   [{d['from']} → {', '.join(d['outputs'])}]")
+        self.plugin_defs.append(d); item=QListWidgetItem(f"{d['name']}   [{', '.join(d['inputs'])} → {', '.join(d['outputs'])}]")
         item.setData(Qt.UserRole,len(self.plugin_defs)-1); item.setForeground(QColor(d["color"])); self.plugins.addItem(item)
 
     @staticmethod
@@ -282,11 +284,13 @@ class LibraryPanel(QWidget):
 
     def define_plugin(self):
         d=DefinitionDialog("Define plugin",[
-            ("name","Plugin name:","New plugin"),("from","Accepts model output type:","Segmentation"),
+            ("name","Plugin name:","New plugin"),
+            ("inputs","Plugin input type(s), comma separated:","Segmentation, Image"),
             ("outputs","Plugin output type(s), comma separated:","Image, Spatial location")],self)
         if d.exec():
             palette=["#45aaf2","#a55eea","#26de81","#fd9644","#fc5c65","#2bcbba"]
-            self.add_plugin_item({"name":d.value("name") or "New plugin","from":d.value("from") or "Any",
+            self.add_plugin_item({"name":d.value("name") or "New plugin",
+                "inputs":self.parse_types(d.value("inputs")),
                 "outputs":self.parse_types(d.value("outputs")),"color":palette[len(self.plugin_defs)%len(palette)]})
 
     def place_model(self,item):
@@ -296,7 +300,7 @@ class LibraryPanel(QWidget):
         if current:
             d=self.plugin_defs[current.data(Qt.UserRole)]
             self.window.scene.active_plugin=d
-            self.window.statusBar().showMessage(f"Active plugin: {d['name']} | {d['from']} → {', '.join(d['outputs'])}")
+            self.window.statusBar().showMessage(f"Active plugin: {d['name']} | {', '.join(d['inputs'])} → {', '.join(d['outputs'])}")
 
 
 class MainWindow(QMainWindow):
