@@ -1,11 +1,11 @@
 import sys
 import json
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
-from PySide6.QtGui import QAction, QBrush, QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QAction, QBrush, QColor, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QDialogButtonBox, QDockWidget,
     QFormLayout, QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem,
-    QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
+    QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
     QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMessageBox, QPushButton, QToolBar, QVBoxLayout, QWidget,
 )
@@ -62,6 +62,8 @@ class ConnectionItem(QGraphicsPathItem):
         self.plugin_input = self.plugin.get("selected_input") or self.plugin.get("inputs", ["Any"])[0]
         self.plugin_output = self.plugin.get("selected_output") or self.plugin.get("outputs", ["Any"])[0]
         self.preview_end = None
+        self.arrow = QGraphicsPolygonItem(self)
+        self.arrow.setZValue(1)
         self.setZValue(-1); self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         source.connections.append(self)
         if target: target.connections.append(self)
@@ -83,8 +85,16 @@ class ConnectionItem(QGraphicsPathItem):
         dx=max(70., abs(b.x()-a.x())*.5)
         path=QPainterPath(a); path.cubicTo(QPointF(a.x()+dx,a.y()), QPointF(b.x()-dx,b.y()), b)
         self.setPath(path)
-        self.setPen(QPen(QColor("#f0b429") if self.isSelected() else QColor(self.plugin["color"]),
-                         3.5 if self.isSelected() else 2.5))
+        color=QColor("#f0b429") if self.isSelected() else QColor(self.plugin["color"])
+        self.setPen(QPen(color, 3.5 if self.isSelected() else 2.5))
+        # Arrow-shaped plugin: the line terminates in a filled arrow head.
+        import math
+        angle=math.atan2(b.y()-path.pointAtPercent(.97).y(), b.x()-path.pointAtPercent(.97).x())
+        size=12
+        p1=QPointF(b.x()-size*math.cos(angle-.55), b.y()-size*math.sin(angle-.55))
+        p2=QPointF(b.x()-size*math.cos(angle+.55), b.y()-size*math.sin(angle+.55))
+        self.arrow.setPolygon(QPolygonF([b,p1,p2]))
+        self.arrow.setBrush(QBrush(color)); self.arrow.setPen(QPen(color,1))
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemSelectedHasChanged: self.update_path()
@@ -98,39 +108,82 @@ class ConnectionItem(QGraphicsPathItem):
 
 class ModelItem(QGraphicsRectItem):
     def __init__(self, definition):
-        self.definition=definition; self.inputs=[]; self.outputs=[]
+        self.definition=definition; self.inputs=[]; self.outputs=[]; self.port_labels=[]
+        self.collapsed=False
         rows=max(len(definition["inputs"]),len(definition["outputs"]),1)
-        self.height=max(100, 54+rows*28)
+        self.expanded_height=max(100,54+rows*28)
+        self.height=self.expanded_height
         super().__init__(0,0,MODEL_WIDTH,self.height)
         self.setBrush(QBrush(QColor("#263248"))); self.setPen(QPen(QColor("#53627a"),1.5))
         for f in (QGraphicsItem.ItemIsMovable,QGraphicsItem.ItemIsSelectable,QGraphicsItem.ItemSendsGeometryChanges):
             self.setFlag(f,True)
-        title=QGraphicsSimpleTextItem(definition["name"],self); title.setBrush(QBrush(QColor("#f5f7fb"))); title.setPos(12,8)
+        self.title=QGraphicsSimpleTextItem("▾  "+definition["name"],self)
+        self.title.setBrush(QBrush(QColor("#f5f7fb"))); self.title.setPos(12,8)
         for idx,t in enumerate(definition["inputs"]):
             y=55+idx*28; p=PortItem(self,"input",t); p.setPos(0,y); self.inputs.append(p)
             lab=QGraphicsSimpleTextItem(t,self); lab.setBrush(QBrush(QColor("#9ee6b8"))); lab.setPos(12,y-9)
+            self.port_labels.append(lab)
         for idx,t in enumerate(definition["outputs"]):
             y=55+idx*28; p=PortItem(self,"output",t); p.setPos(MODEL_WIDTH,y); self.outputs.append(p)
             lab=QGraphicsSimpleTextItem(t,self); lab.setBrush(QBrush(QColor("#ffc477")))
-            lab.setPos(MODEL_WIDTH-12-lab.boundingRect().width(),y-9)
-        self.setToolTip("Inputs: "+", ".join(definition["inputs"])+"\nOutputs: "+", ".join(definition["outputs"]))
+            lab.setPos(MODEL_WIDTH-12-lab.boundingRect().width(),y-9); self.port_labels.append(lab)
+        self.setToolTip("Double-click to collapse/expand\nInputs: "+", ".join(definition["inputs"])+"\nOutputs: "+", ".join(definition["outputs"]))
+
+    def mouseDoubleClickEvent(self,event):
+        self.collapsed=not self.collapsed
+        if self.collapsed:
+            self.height=42; self.setRect(0,0,MODEL_WIDTH,self.height)
+            self.title.setText("▸  "+self.definition["name"])
+            for lab in self.port_labels: lab.hide()
+            for p in self.inputs: p.setPos(0,self.height/2); p.hide()
+            for p in self.outputs: p.setPos(MODEL_WIDTH,self.height/2); p.hide()
+        else:
+            self.height=self.expanded_height; self.setRect(0,0,MODEL_WIDTH,self.height)
+            self.title.setText("▾  "+self.definition["name"])
+            for lab in self.port_labels: lab.show()
+            for idx,p in enumerate(self.inputs): p.setPos(0,55+idx*28); p.show()
+            for idx,p in enumerate(self.outputs): p.setPos(MODEL_WIDTH,55+idx*28); p.show()
+        for p in self.inputs+self.outputs:
+            for conn in list(p.connections): conn.update_path()
+        event.accept()
 
     def itemChange(self,change,value):
         if change == QGraphicsItem.ItemPositionHasChanged:
             for p in self.inputs+self.outputs:
-                for c in list(p.connections): c.update_path()
+                for conn in list(p.connections): conn.update_path()
         if change == QGraphicsItem.ItemSelectedHasChanged:
             self.setPen(QPen(QColor("#f0b429") if value else QColor("#53627a"),2.5 if value else 1.5))
         return super().itemChange(change,value)
 
     def all_connections(self):
-        return list({c for p in self.inputs+self.outputs for c in p.connections})
+        return list({conn for p in self.inputs+self.outputs for conn in p.connections})
+
+
+class FixedEndpointItem(ModelItem):
+    def __init__(self, definition, side):
+        super().__init__(definition)
+        self.side=side
+        self.setBrush(QBrush(QColor("#183b32") if side=="left" else QColor("#3b2f18")))
+        self.setPen(QPen(QColor("#62c7a0") if side=="left" else QColor("#d7ad5c"),2))
+        self.setFlag(QGraphicsItem.ItemIsMovable,False)
+        self.setFlag(QGraphicsItem.ItemIsSelectable,False)
+        self.title.setText(("DATASET  " if side=="left" else "PIPELINE OUTPUT  ")+definition["name"])
+        self.setToolTip("Fixed pipeline endpoint. Components are represented by typed ports.")
+        # Dataset is a source: hide its inputs. Final output is a sink: hide its outputs.
+        if side=="left":
+            for p in self.inputs: p.hide()
+        else:
+            for p in self.outputs: p.hide()
+
+    def mouseDoubleClickEvent(self,event):
+        event.accept()
 
 
 class PipelineScene(QGraphicsScene):
     def __init__(self,parent=None):
         super().__init__(parent); self.setSceneRect(QRectF(-2000,-1500,4000,3000))
         self.pending=None; self.active_plugin=DEFAULT_PLUGINS[0]
+        self.dataset_block=None; self.output_block=None
 
     def add_model(self,d,pos):
         m=ModelItem(d); self.addItem(m); m.setPos(pos); return m
@@ -233,8 +286,8 @@ class PipelineScene(QGraphicsScene):
         for i in selected:
             if isinstance(i,ConnectionItem): i.detach()
         for i in selected:
-            if isinstance(i,ModelItem):
-                for c in i.all_connections(): c.detach()
+            if isinstance(i,ModelItem) and not isinstance(i,FixedEndpointItem):
+                for conn in i.all_connections(): conn.detach()
                 self.removeItem(i)
 
     def relationship_summary(self):
@@ -402,12 +455,30 @@ class MainWindow(QMainWindow):
         dock.setMinimumWidth(360); self.addDockWidget(Qt.LeftDockWidgetArea,dock)
         tb=QToolBar("Pipeline"); tb.setMovable(False); self.addToolBar(tb)
         a=QAction("Delete selected",self); a.triggered.connect(self.scene.delete_selected); tb.addAction(a)
-        a=QAction("Clear canvas",self); a.triggered.connect(self.scene.clear); tb.addAction(a)
+        a=QAction("Clear canvas",self); a.triggered.connect(self.clear_pipeline); tb.addAction(a)
         tb.addSeparator()
         a=QAction("Explain relationships",self); a.triggered.connect(self.show_relationships); tb.addAction(a)
         a=QAction("Show relationship code",self); a.triggered.connect(self.show_relationship_code); tb.addAction(a)
         a=QAction("Show QBasic",self); a.triggered.connect(self.show_qbasic_code); tb.addAction(a)
+        self.build_fixed_endpoints()
         self.build_demo()
+
+    def build_fixed_endpoints(self):
+        dataset={"name":"Case data","inputs":[],"outputs":["Image","Segmentation","Metadata"]}
+        result={"name":"Results","inputs":["Image","Segmentation","Spatial location","Volume","Scalar","Table"],"outputs":[]}
+        self.scene.dataset_block=FixedEndpointItem(dataset,"left")
+        self.scene.output_block=FixedEndpointItem(result,"right")
+        self.scene.addItem(self.scene.dataset_block); self.scene.addItem(self.scene.output_block)
+        self.scene.dataset_block.setPos(-720,-120)
+        self.scene.output_block.setPos(500,-160)
+
+    def clear_pipeline(self):
+        self.scene.cancel_pending()
+        for item in list(self.scene.items()):
+            if isinstance(item,ConnectionItem):
+                item.detach()
+            elif isinstance(item,ModelItem) and not isinstance(item,FixedEndpointItem):
+                self.scene.removeItem(item)
 
     def show_relationships(self):
         box=QMessageBox(self)
@@ -476,8 +547,8 @@ class MainWindow(QMainWindow):
         c=ConnectionItem(a.outputs[a_port],b.inputs[b_port],plugin.copy()); self.scene.addItem(c)
 
     def build_demo(self):
-        a=self.scene.add_model(DEFAULT_MODELS[0],QPointF(-350,-60))
-        b=self.scene.add_model(DEFAULT_MODELS[2],QPointF(70,-60))
+        a=self.scene.add_model(DEFAULT_MODELS[0],QPointF(-380,-60))
+        b=self.scene.add_model(DEFAULT_MODELS[2],QPointF(80,-60))
         self.connect(a,0,b,0,DEFAULT_PLUGINS[1])
         self.view.centerOn(QPointF(0,0))
 
