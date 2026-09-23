@@ -1,4 +1,5 @@
 import sys
+import json
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QAction, QBrush, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
@@ -260,6 +261,31 @@ class PipelineScene(QGraphicsScene):
             )
         return "\n\n".join(lines)
 
+    def relationship_code(self):
+        connections=[i for i in self.items() if isinstance(i,ConnectionItem) and i.target_port]
+        graph={"schema":"diagram-connect.pipeline.v1","connections":[]}
+        for conn in reversed(connections):
+            src=conn.source_port.parent_model
+            dst=conn.target_port.parent_model
+            graph["connections"].append({
+                "source_model":src.definition["name"],
+                "source_output":{
+                    "index":src.outputs.index(conn.source_port)+1,
+                    "type":conn.source_port.data_type,
+                },
+                "plugin":{
+                    "name":conn.plugin["name"],
+                    "input":conn.plugin_input,
+                    "output":conn.plugin_output,
+                },
+                "receiver_model":dst.definition["name"],
+                "receiver_input":{
+                    "index":dst.inputs.index(conn.target_port)+1,
+                    "type":conn.target_port.data_type,
+                },
+            })
+        return json.dumps(graph,indent=2)
+
 
 class PipelineView(QGraphicsView):
     def __init__(self,scene):
@@ -338,6 +364,7 @@ class MainWindow(QMainWindow):
         a=QAction("Clear canvas",self); a.triggered.connect(self.scene.clear); tb.addAction(a)
         tb.addSeparator()
         a=QAction("Explain relationships",self); a.triggered.connect(self.show_relationships); tb.addAction(a)
+        a=QAction("Show relationship code",self); a.triggered.connect(self.show_relationship_code); tb.addAction(a)
         self.build_demo()
 
     def show_relationships(self):
@@ -349,6 +376,26 @@ class MainWindow(QMainWindow):
         box.setStandardButtons(QMessageBox.Ok)
         box.setMinimumWidth(650)
         box.exec()
+
+    def show_relationship_code(self):
+        dialog=QDialog(self)
+        dialog.setWindowTitle("Pipeline Relationship Code")
+        dialog.resize(760,600)
+        layout=QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            "Machine-readable JSON representation of the current model → plugin → model relationships:"
+        ))
+        from PySide6.QtWidgets import QPlainTextEdit
+        editor=QPlainTextEdit()
+        editor.setReadOnly(True)
+        editor.setPlainText(self.scene.relationship_code())
+        editor.setLineWrapMode(QPlainTextEdit.NoWrap)
+        layout.addWidget(editor)
+        buttons=QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def add_named_model(self,d):
         center=self.view.mapToScene(self.view.viewport().rect().center())
