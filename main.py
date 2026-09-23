@@ -2,270 +2,273 @@ import sys
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QAction, QBrush, QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QApplication, QDockWidget, QGraphicsEllipseItem, QGraphicsItem,
-    QGraphicsPathItem, QGraphicsRectItem, QGraphicsScene,
-    QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QInputDialog,
-    QLabel, QListWidget, QListWidgetItem, QMainWindow, QPushButton,
-    QToolBar, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QDialogButtonBox, QDockWidget,
+    QFormLayout, QGraphicsEllipseItem, QGraphicsItem, QGraphicsPathItem,
+    QGraphicsRectItem, QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView,
+    QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMessageBox, QPushButton, QToolBar, QVBoxLayout, QWidget,
 )
 
-MODEL_WIDTH, MODEL_HEIGHT, PORT_RADIUS = 170, 86, 7
+MODEL_WIDTH, PORT_RADIUS = 220, 7
+DATA_TYPES = ["Image", "Segmentation", "Spatial location", "Volume", "Scalar", "Table", "Any"]
 
-DEFAULT_MODELS = ["nnU-Net v2", "MONAI Model", "Generic Segmentation Model"]
+DEFAULT_MODELS = [
+    {"name": "nnU-Net v2", "inputs": ["Image"], "outputs": ["Segmentation"]},
+    {"name": "MONAI Model", "inputs": ["Image"], "outputs": ["Segmentation"]},
+    {"name": "Measurement Model", "inputs": ["Segmentation"], "outputs": ["Volume"]},
+]
 DEFAULT_PLUGINS = [
-    ("Direct", "#6b93ff"),
-    ("Segmentation → Spatial location", "#e056fd"),
-    ("Segmentation → Volume", "#ff9f43"),
-    ("Crop / ROI", "#20bf6b"),
+    {"name": "Direct image", "from": "Image", "to": "Image", "color": "#6b93ff"},
+    {"name": "Direct segmentation", "from": "Segmentation", "to": "Segmentation", "color": "#2bcbba"},
+    {"name": "Spatial locator", "from": "Segmentation", "to": "Spatial location", "color": "#e056fd"},
+    {"name": "Volume extractor", "from": "Segmentation", "to": "Volume", "color": "#ff9f43"},
 ]
 
 
-class ConnectionItem(QGraphicsPathItem):
-    def __init__(self, source_port, target_port=None, plugin_name="Direct", color="#6b93ff"):
-        super().__init__()
-        self.source_port, self.target_port = source_port, target_port
-        self.plugin_name, self.color = plugin_name, color
-        self.preview_end = None
-        self.setZValue(-1)
-        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
-        source_port.connections.append(self)
-        if target_port:
-            target_port.connections.append(self)
-        self.update_path()
+class DefinitionDialog(QDialog):
+    def __init__(self, title, fields, parent=None):
+        super().__init__(parent); self.setWindowTitle(title)
+        form = QFormLayout(self); self.widgets = {}
+        for key, label, default in fields:
+            w = QLineEdit(default); self.widgets[key] = w; form.addRow(label, w)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
 
-    def set_preview_end(self, pos):
-        self.preview_end = pos
-        self.update_path()
-
-    def attach_target(self, port):
-        self.target_port = port
-        self.preview_end = None
-        if self not in port.connections:
-            port.connections.append(self)
-        self.update_path()
-
-    def update_path(self):
-        start = self.source_port.scenePos()
-        end = self.target_port.scenePos() if self.target_port else (self.preview_end or start)
-        dx = max(70.0, abs(end.x() - start.x()) * .5)
-        path = QPainterPath(start)
-        path.cubicTo(QPointF(start.x()+dx, start.y()), QPointF(end.x()-dx, end.y()), end)
-        self.setPath(path)
-        self.setPen(QPen(QColor("#f0b429") if self.isSelected() else QColor(self.color),
-                         3.5 if self.isSelected() else 2.5))
-
-    def itemChange(self, change, value):
-        if change == QGraphicsItem.ItemSelectedHasChanged:
-            self.update_path()
-        return super().itemChange(change, value)
-
-    def detach(self):
-        if self in self.source_port.connections:
-            self.source_port.connections.remove(self)
-        if self.target_port and self in self.target_port.connections:
-            self.target_port.connections.remove(self)
-        if self.scene():
-            self.scene().removeItem(self)
+    def value(self, key): return self.widgets[key].text().strip()
 
 
 class PortItem(QGraphicsEllipseItem):
-    def __init__(self, model, kind):
+    def __init__(self, model, kind, data_type):
         r = PORT_RADIUS
         super().__init__(-r, -r, 2*r, 2*r, model)
-        self.parent_model, self.kind, self.connections = model, kind, []
+        self.parent_model, self.kind, self.data_type, self.connections = model, kind, data_type, []
         self.setBrush(QBrush(QColor("#50c878") if kind == "input" else QColor("#ff9f43")))
-        self.setPen(QPen(QColor("#1d2433"), 1.5))
-        self.setZValue(3)
-        self.setCursor(Qt.CrossCursor)
+        self.setPen(QPen(QColor("#111722"), 1.5)); self.setZValue(3); self.setCursor(Qt.CrossCursor)
+        self.setToolTip(f"{kind.title()}: {data_type}")
 
     def mousePressEvent(self, event):
         if self.kind == "output" and event.button() == Qt.LeftButton:
-            self.scene().begin_connection(self, event.scenePos())
-            event.accept()
-            return
+            self.scene().begin_connection(self, event.scenePos()); event.accept(); return
         super().mousePressEvent(event)
 
 
-class ModelItem(QGraphicsRectItem):
-    def __init__(self, title):
-        super().__init__(0, 0, MODEL_WIDTH, MODEL_HEIGHT)
-        self.title = title
-        self.setBrush(QBrush(QColor("#263248")))
-        self.setPen(QPen(QColor("#53627a"), 1.5))
-        for flag in (QGraphicsItem.ItemIsMovable, QGraphicsItem.ItemIsSelectable,
-                     QGraphicsItem.ItemSendsGeometryChanges):
-            self.setFlag(flag, True)
-        label = QGraphicsSimpleTextItem(title, self)
-        label.setBrush(QBrush(QColor("#f5f7fb"))); label.setPos(14, 11)
-        for text, x in (("IN", 14), ("OUT", MODEL_WIDTH-42)):
-            lab = QGraphicsSimpleTextItem(text, self)
-            lab.setBrush(QBrush(QColor("#aeb8c9"))); lab.setPos(x, 54)
-        self.input_port, self.output_port = PortItem(self, "input"), PortItem(self, "output")
-        self.input_port.setPos(0, MODEL_HEIGHT/2)
-        self.output_port.setPos(MODEL_WIDTH, MODEL_HEIGHT/2)
+class ConnectionItem(QGraphicsPathItem):
+    def __init__(self, source, target=None, plugin=None):
+        super().__init__()
+        self.source_port, self.target_port = source, target
+        self.plugin = plugin or {"name":"Direct", "from":"Any", "to":"Any", "color":"#6b93ff"}
+        self.preview_end = None
+        self.setZValue(-1); self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        source.connections.append(self)
+        if target: target.connections.append(self)
+        self.setToolTip(self.description()); self.update_path()
+
+    def description(self):
+        p=self.plugin
+        return f"{p['name']}: {p['from']} → {p['to']}"
+
+    def set_preview_end(self, p): self.preview_end=p; self.update_path()
+
+    def attach_target(self, p):
+        self.target_port=p; self.preview_end=None; p.connections.append(self)
+        self.setToolTip(self.description()); self.update_path()
+
+    def update_path(self):
+        a=self.source_port.scenePos()
+        b=self.target_port.scenePos() if self.target_port else (self.preview_end or a)
+        dx=max(70., abs(b.x()-a.x())*.5)
+        path=QPainterPath(a); path.cubicTo(QPointF(a.x()+dx,a.y()), QPointF(b.x()-dx,b.y()), b)
+        self.setPath(path)
+        self.setPen(QPen(QColor("#f0b429") if self.isSelected() else QColor(self.plugin["color"]),
+                         3.5 if self.isSelected() else 2.5))
 
     def itemChange(self, change, value):
+        if change == QGraphicsItem.ItemSelectedHasChanged: self.update_path()
+        return super().itemChange(change,value)
+
+    def detach(self):
+        if self in self.source_port.connections: self.source_port.connections.remove(self)
+        if self.target_port and self in self.target_port.connections: self.target_port.connections.remove(self)
+        if self.scene(): self.scene().removeItem(self)
+
+
+class ModelItem(QGraphicsRectItem):
+    def __init__(self, definition):
+        self.definition=definition; self.inputs=[]; self.outputs=[]
+        rows=max(len(definition["inputs"]),len(definition["outputs"]),1)
+        self.height=max(100, 54+rows*28)
+        super().__init__(0,0,MODEL_WIDTH,self.height)
+        self.setBrush(QBrush(QColor("#263248"))); self.setPen(QPen(QColor("#53627a"),1.5))
+        for f in (QGraphicsItem.ItemIsMovable,QGraphicsItem.ItemIsSelectable,QGraphicsItem.ItemSendsGeometryChanges):
+            self.setFlag(f,True)
+        title=QGraphicsSimpleTextItem(definition["name"],self); title.setBrush(QBrush(QColor("#f5f7fb"))); title.setPos(12,8)
+        for idx,t in enumerate(definition["inputs"]):
+            y=55+idx*28; p=PortItem(self,"input",t); p.setPos(0,y); self.inputs.append(p)
+            lab=QGraphicsSimpleTextItem(t,self); lab.setBrush(QBrush(QColor("#9ee6b8"))); lab.setPos(12,y-9)
+        for idx,t in enumerate(definition["outputs"]):
+            y=55+idx*28; p=PortItem(self,"output",t); p.setPos(MODEL_WIDTH,y); self.outputs.append(p)
+            lab=QGraphicsSimpleTextItem(t,self); lab.setBrush(QBrush(QColor("#ffc477")))
+            lab.setPos(MODEL_WIDTH-12-lab.boundingRect().width(),y-9)
+        self.setToolTip("Inputs: "+", ".join(definition["inputs"])+"\nOutputs: "+", ".join(definition["outputs"]))
+
+    def itemChange(self,change,value):
         if change == QGraphicsItem.ItemPositionHasChanged:
-            for p in (self.input_port, self.output_port):
+            for p in self.inputs+self.outputs:
                 for c in list(p.connections): c.update_path()
         if change == QGraphicsItem.ItemSelectedHasChanged:
-            self.setPen(QPen(QColor("#f0b429") if value else QColor("#53627a"), 2.5 if value else 1.5))
-        return super().itemChange(change, value)
+            self.setPen(QPen(QColor("#f0b429") if value else QColor("#53627a"),2.5 if value else 1.5))
+        return super().itemChange(change,value)
 
     def all_connections(self):
-        return list(set(self.input_port.connections + self.output_port.connections))
+        return list({c for p in self.inputs+self.outputs for c in p.connections})
 
 
 class PipelineScene(QGraphicsScene):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setSceneRect(QRectF(-2000, -1500, 4000, 3000))
-        self.pending_connection = None
-        self.active_plugin = ("Direct", "#6b93ff")
+    def __init__(self,parent=None):
+        super().__init__(parent); self.setSceneRect(QRectF(-2000,-1500,4000,3000))
+        self.pending=None; self.active_plugin=DEFAULT_PLUGINS[0]
 
-    def add_model(self, title, pos):
-        m = ModelItem(title); self.addItem(m); m.setPos(pos); return m
+    def add_model(self,d,pos):
+        m=ModelItem(d); self.addItem(m); m.setPos(pos); return m
 
-    def begin_connection(self, port, pos):
+    @staticmethod
+    def matches(actual,required): return actual==required or actual=="Any" or required=="Any"
+
+    def begin_connection(self,port,pos):
         self.cancel_pending()
-        name, color = self.active_plugin
-        self.pending_connection = ConnectionItem(port, plugin_name=name, color=color)
-        self.addItem(self.pending_connection)
-        self.pending_connection.set_preview_end(pos)
+        if not self.matches(port.data_type,self.active_plugin["from"]):
+            QMessageBox.warning(None,"Incompatible plugin",
+                f"{self.active_plugin['name']} requires a {self.active_plugin['from']} output, "
+                f"but this port produces {port.data_type}.")
+            return
+        self.pending=ConnectionItem(port,plugin=self.active_plugin.copy())
+        self.addItem(self.pending); self.pending.set_preview_end(pos)
 
     def cancel_pending(self):
-        if self.pending_connection:
-            self.pending_connection.detach(); self.pending_connection = None
+        if self.pending: self.pending.detach(); self.pending=None
 
-    def mouseMoveEvent(self, event):
-        if self.pending_connection:
-            self.pending_connection.set_preview_end(event.scenePos()); event.accept(); return
-        super().mouseMoveEvent(event)
+    def mouseMoveEvent(self,e):
+        if self.pending: self.pending.set_preview_end(e.scenePos()); e.accept(); return
+        super().mouseMoveEvent(e)
 
-    def mouseReleaseEvent(self, event):
-        if self.pending_connection:
-            target = next((i for i in self.items(event.scenePos())
-                           if isinstance(i, PortItem) and i.kind == "input"), None)
-            if target and target.parent_model is not self.pending_connection.source_port.parent_model:
-                self.pending_connection.attach_target(target); self.pending_connection = None
-            else:
-                self.cancel_pending()
-            event.accept(); return
-        super().mouseReleaseEvent(event)
+    def mouseReleaseEvent(self,e):
+        if self.pending:
+            target=next((i for i in self.items(e.scenePos()) if isinstance(i,PortItem) and i.kind=="input"),None)
+            if target and target.parent_model is not self.pending.source_port.parent_model:
+                required=self.pending.plugin["to"]
+                if self.matches(target.data_type,required):
+                    self.pending.attach_target(target); self.pending=None
+                else:
+                    QMessageBox.warning(None,"Incompatible input",
+                        f"{self.pending.plugin['name']} produces {required}, "
+                        f"but this model input expects {target.data_type}.")
+                    self.cancel_pending()
+            else: self.cancel_pending()
+            e.accept(); return
+        super().mouseReleaseEvent(e)
 
     def delete_selected(self):
-        selected = list(self.selectedItems())
+        selected=list(self.selectedItems())
         for i in selected:
-            if isinstance(i, ConnectionItem): i.detach()
+            if isinstance(i,ConnectionItem): i.detach()
         for i in selected:
-            if isinstance(i, ModelItem):
+            if isinstance(i,ModelItem):
                 for c in i.all_connections(): c.detach()
                 self.removeItem(i)
 
 
 class PipelineView(QGraphicsView):
-    def __init__(self, scene):
-        super().__init__(scene)
-        self.setRenderHint(QPainter.Antialiasing, True)
-        self.setDragMode(QGraphicsView.RubberBandDrag)
-        self.setBackgroundBrush(QBrush(QColor("#151b26")))
-
-    def wheelEvent(self, event):
-        f = 1.15 if event.angleDelta().y() > 0 else 1/1.15
-        self.scale(f, f)
+    def __init__(self,scene):
+        super().__init__(scene); self.setRenderHint(QPainter.Antialiasing,True)
+        self.setDragMode(QGraphicsView.RubberBandDrag); self.setBackgroundBrush(QBrush(QColor("#151b26")))
+    def wheelEvent(self,e):
+        f=1.15 if e.angleDelta().y()>0 else 1/1.15; self.scale(f,f)
 
 
 class LibraryPanel(QWidget):
-    def __init__(self, window):
-        super().__init__()
-        self.window = window
-        layout = QVBoxLayout(self)
+    def __init__(self,window):
+        super().__init__(); self.window=window; self.model_defs=[]; self.plugin_defs=[]
+        layout=QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Models</b><br><small>Double-click to place</small>"))
+        self.models=QListWidget(); layout.addWidget(self.models)
+        for d in DEFAULT_MODELS: self.add_model_item(d)
+        self.models.itemDoubleClicked.connect(self.place_model)
+        b=QPushButton("+ Define model"); b.clicked.connect(self.define_model); layout.addWidget(b)
 
-        layout.addWidget(QLabel("<b>Models</b>"))
-        self.models = QListWidget()
-        for name in DEFAULT_MODELS: self.models.addItem(name)
-        self.models.itemDoubleClicked.connect(lambda i: window.add_named_model(i.text()))
-        layout.addWidget(self.models)
-        add_model = QPushButton("+ Add model type")
-        add_model.clicked.connect(self.add_model_type); layout.addWidget(add_model)
-
-        layout.addWidget(QLabel("<b>Plugins / connectors</b>"))
-        self.plugins = QListWidget()
-        for name, color in DEFAULT_PLUGINS: self.add_plugin_item(name, color)
+        layout.addWidget(QLabel("<b>Plugins / connectors</b><br><small>Select before drawing</small>"))
+        self.plugins=QListWidget(); layout.addWidget(self.plugins)
+        for d in DEFAULT_PLUGINS: self.add_plugin_item(d)
         self.plugins.currentItemChanged.connect(self.plugin_selected)
-        layout.addWidget(self.plugins)
-        add_plugin = QPushButton("+ Add plugin type")
-        add_plugin.clicked.connect(self.add_plugin_type); layout.addWidget(add_plugin)
-        layout.addStretch()
-        self.plugins.setCurrentRow(0)
+        b=QPushButton("+ Define plugin"); b.clicked.connect(self.define_plugin); layout.addWidget(b)
+        layout.addStretch(); self.plugins.setCurrentRow(0)
 
-    def add_plugin_item(self, name, color):
-        item = QListWidgetItem(name)
-        item.setData(Qt.UserRole, color)
-        item.setForeground(QColor(color))
-        self.plugins.addItem(item)
+    def add_model_item(self,d):
+        self.model_defs.append(d); item=QListWidgetItem(f"{d['name']}   [{', '.join(d['inputs'])} → {', '.join(d['outputs'])}]")
+        item.setData(Qt.UserRole,len(self.model_defs)-1); self.models.addItem(item)
 
-    def add_model_type(self):
-        name, ok = QInputDialog.getText(self, "Add model type", "Model name:")
-        if ok and name.strip(): self.models.addItem(name.strip())
+    def add_plugin_item(self,d):
+        self.plugin_defs.append(d); item=QListWidgetItem(f"{d['name']}   [{d['from']} → {d['to']}]")
+        item.setData(Qt.UserRole,len(self.plugin_defs)-1); item.setForeground(QColor(d["color"])); self.plugins.addItem(item)
 
-    def add_plugin_type(self):
-        name, ok = QInputDialog.getText(self, "Add plugin type", "Plugin name:")
-        if ok and name.strip():
-            palette = ["#45aaf2", "#a55eea", "#26de81", "#fd9644", "#fc5c65", "#2bcbba"]
-            self.add_plugin_item(name.strip(), palette[self.plugins.count() % len(palette)])
+    @staticmethod
+    def parse_types(text):
+        return [x.strip() for x in text.split(",") if x.strip()] or ["Any"]
 
-    def plugin_selected(self, current, previous):
+    def define_model(self):
+        d=DefinitionDialog("Define model",[
+            ("name","Model name:","New model"),("inputs","Input type(s), comma separated:","Image"),
+            ("outputs","Output type(s), comma separated:","Segmentation")],self)
+        if d.exec():
+            self.add_model_item({"name":d.value("name") or "New model",
+                "inputs":self.parse_types(d.value("inputs")),"outputs":self.parse_types(d.value("outputs"))})
+
+    def define_plugin(self):
+        d=DefinitionDialog("Define plugin",[
+            ("name","Plugin name:","New plugin"),("from","Accepts output type:","Segmentation"),
+            ("to","Produces / connects to input type:","Image")],self)
+        if d.exec():
+            palette=["#45aaf2","#a55eea","#26de81","#fd9644","#fc5c65","#2bcbba"]
+            self.add_plugin_item({"name":d.value("name") or "New plugin","from":d.value("from") or "Any",
+                "to":d.value("to") or "Any","color":palette[len(self.plugin_defs)%len(palette)]})
+
+    def place_model(self,item):
+        self.window.add_named_model(self.model_defs[item.data(Qt.UserRole)])
+
+    def plugin_selected(self,current,previous):
         if current:
-            self.window.scene.active_plugin = (current.text(), current.data(Qt.UserRole))
-            self.window.statusBar().showMessage(
-                f"Active connector: {current.text()} — drag OUT → IN to use it."
-            )
+            d=self.plugin_defs[current.data(Qt.UserRole)]
+            self.window.scene.active_plugin=d
+            self.window.statusBar().showMessage(f"Active plugin: {d['name']} | {d['from']} → {d['to']}")
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Diagram Connect — AI Pipeline Mock-up")
-        self.resize(1300, 800)
-        self.scene = PipelineScene(self)
-        self.view = PipelineView(self.scene)
-        self.setCentralWidget(self.view)
-        self.build_library()
-        self.build_toolbar()
+        super().__init__(); self.setWindowTitle("Diagram Connect — Typed AI Pipeline Mock-up"); self.resize(1350,820)
+        self.scene=PipelineScene(self); self.view=PipelineView(self.scene); self.setCentralWidget(self.view)
+        dock=QDockWidget("Pipeline Library",self); self.library=LibraryPanel(self); dock.setWidget(self.library)
+        dock.setMinimumWidth(360); self.addDockWidget(Qt.LeftDockWidgetArea,dock)
+        tb=QToolBar("Pipeline"); tb.setMovable(False); self.addToolBar(tb)
+        a=QAction("Delete selected",self); a.triggered.connect(self.scene.delete_selected); tb.addAction(a)
+        a=QAction("Clear canvas",self); a.triggered.connect(self.scene.clear); tb.addAction(a)
         self.build_demo()
 
-    def build_library(self):
-        dock = QDockWidget("Pipeline Library", self)
-        dock.setWidget(LibraryPanel(self))
-        dock.setMinimumWidth(260)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+    def add_named_model(self,d):
+        center=self.view.mapToScene(self.view.viewport().rect().center())
+        self.scene.add_model(d,center-QPointF(MODEL_WIDTH/2,70))
 
-    def build_toolbar(self):
-        tb = QToolBar("Pipeline"); tb.setMovable(False); self.addToolBar(tb)
-        delete = QAction("Delete selected", self); delete.triggered.connect(self.scene.delete_selected); tb.addAction(delete)
-        clear = QAction("Clear canvas", self); clear.triggered.connect(self.scene.clear); tb.addAction(clear)
-
-    def add_named_model(self, name):
-        center = self.view.mapToScene(self.view.viewport().rect().center())
-        self.scene.add_model(name, center - QPointF(MODEL_WIDTH/2, MODEL_HEIGHT/2))
-
-    def connect(self, a, b, plugin):
-        name, color = plugin
-        c = ConnectionItem(a.output_port, b.input_port, name, color)
-        self.scene.addItem(c)
+    def connect(self,a,a_port,b,b_port,plugin):
+        c=ConnectionItem(a.outputs[a_port],b.inputs[b_port],plugin.copy()); self.scene.addItem(c)
 
     def build_demo(self):
-        a = self.scene.add_model("nnU-Net v2", QPointF(-330, -40))
-        b = self.scene.add_model("MONAI Model", QPointF(60, -40))
-        self.connect(a, b, DEFAULT_PLUGINS[0])
-        self.view.centerOn(QPointF(0, 0))
+        a=self.scene.add_model(DEFAULT_MODELS[0],QPointF(-350,-60))
+        b=self.scene.add_model(DEFAULT_MODELS[2],QPointF(70,-60))
+        self.connect(a,0,b,0,DEFAULT_PLUGINS[1])
+        self.view.centerOn(QPointF(0,0))
 
 
 def main():
-    app = QApplication(sys.argv); app.setStyle("Fusion")
-    w = MainWindow(); w.show(); sys.exit(app.exec())
+    app=QApplication(sys.argv); app.setStyle("Fusion")
+    w=MainWindow(); w.show(); sys.exit(app.exec())
 
-
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
