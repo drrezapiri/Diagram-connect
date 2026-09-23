@@ -192,15 +192,21 @@ class PipelineScene(QGraphicsScene):
                         f"but {model.definition['name']} has no compatible input.")
                     self.cancel_pending()
                 else:
-                    # The drop identifies the model; when several ports accept the same
-                    # type, explicitly ask which semantic input slot the plugin feeds.
-                    if len(compatible)>1:
-                        chosen=self.choose_port(model,"input",required)
-                        if chosen is None:
-                            self.cancel_pending(); e.accept(); return
-                        target=chosen
-                    elif not self.matches(target.data_type,required):
-                        target=compatible[0]
+                    # Finishing a plugin on a receiver model always confirms the exact
+                    # receiving input slot. This remains explicit even when only one
+                    # compatible input currently exists.
+                    labels=[]
+                    for p in compatible:
+                        number=model.inputs.index(p)+1
+                        labels.append(f"Input {number}: {p.data_type}")
+                    choice,ok=QInputDialog.getItem(
+                        None,"Choose receiver input",
+                        f"Which input of {model.definition['name']} should receive "
+                        f"{self.pending.plugin['name']}?",
+                        labels,0,False)
+                    if not ok:
+                        self.cancel_pending(); e.accept(); return
+                    target=compatible[labels.index(choice)]
                     self.pending.attach_target(target); self.pending=None
             else: self.cancel_pending()
             e.accept(); return
