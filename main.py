@@ -707,9 +707,8 @@ class PipelineScene(QGraphicsScene):
                 continue
 
             preds = incoming[node]
-            reachable_preds = [p for p in preds if p in levels]
-            if reachable_preds:
-                levels[node] = max(levels[p] for p in reachable_preds) + 1
+            if preds and all(p in levels for p in preds):
+                levels[node] = max(levels[p] for p in preds) + 1
             elif not preds and isinstance(node, FixedEndpointItem):
                 levels[node] = 0
 
