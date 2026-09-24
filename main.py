@@ -1061,7 +1061,7 @@ class PipelineScene(QGraphicsScene):
                     f'RECEIVER_NODE$ = "{dst.node_id}"',
                     f'RECEIVER_PORT$ = "{transfer.target_port.port_id}"',
                     f'RECEIVER_NAME$ = "{transfer.target_port.name}"',
-                    'PRINT SOURCE_NODE$; "."; SOURCE_PORT$; " -> "; RECEIVER_NODE$; "."; RECEIVER_PORT
+                    'PRINT SOURCE_NODE$; "."; SOURCE_PORT$; " -> "; RECEIVER_NODE$; "."; RECEIVER_PORT$',
                     "",
                 ]
             )
