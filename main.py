@@ -243,6 +243,15 @@ class TransferItem(QGraphicsPathItem):
 
         self.arrow = QGraphicsPolygonItem(self)
         self.arrow.setZValue(1)
+
+        self.flow_state = "idle"
+        self.flow_progress = 0.0
+        self.flow_dot = QGraphicsEllipseItem(-5, -5, 10, 10, self)
+        self.flow_dot.setBrush(QBrush(QColor("#dffcff")))
+        self.flow_dot.setPen(QPen(QColor("#4dd0e1"), 1.5))
+        self.flow_dot.setZValue(3)
+        self.flow_dot.hide()
+
         self.setZValue(-2)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
 
@@ -279,8 +288,19 @@ class TransferItem(QGraphicsPathItem):
         )
         self.setPath(path)
 
-        color = QColor("#f0b429") if self.isSelected() else QColor("#8793a7")
-        self.setPen(QPen(color, 3.2 if self.isSelected() else 2.0))
+        if self.isSelected():
+            color = QColor("#f0b429")
+            width = 3.2
+        elif self.flow_state == "active":
+            color = QColor("#4dd0e1")
+            width = 3.4
+        elif self.flow_state == "done":
+            color = QColor("#55c98b")
+            width = 2.7
+        else:
+            color = QColor("#8793a7")
+            width = 2.0
+        self.setPen(QPen(color, width))
 
         near_end = path.pointAtPercent(0.97)
         angle = math.atan2(end.y() - near_end.y(), end.x() - near_end.x())
@@ -290,6 +310,17 @@ class TransferItem(QGraphicsPathItem):
         self.arrow.setPolygon(QPolygonF([end, p1, p2]))
         self.arrow.setBrush(QBrush(color))
         self.arrow.setPen(QPen(color, 1))
+
+        if self.flow_state == "active":
+            self.flow_dot.setPos(path.pointAtPercent(max(0.0, min(1.0, self.flow_progress))))
+            self.flow_dot.show()
+        else:
+            self.flow_dot.hide()
+
+    def set_flow_state(self, state, progress=0.0):
+        self.flow_state = state
+        self.flow_progress = progress
+        self.update_path()
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemSelectedHasChanged:
@@ -317,6 +348,7 @@ class BaseExecutableNode:
         self.port_labels = []
         self.activation_order = None
         self.validation_state = "unknown"
+        self.execution_state = "idle"
 
     def all_connections(self):
         return list({c for p in self.inputs + self.outputs for c in p.connections})
@@ -724,6 +756,106 @@ class PipelineScene(QGraphicsScene):
         for node in self.executable_nodes():
             node.set_activation_order(orders.get(node))
 
+    def set_node_execution_visual(self, node, state):
+        node.execution_state = state
+
+        if isinstance(node, FixedEndpointItem):
+            idle_color = QColor("#62c7a0") if node.side == "left" else QColor("#d7ad5c")
+        elif isinstance(node, PluginItem):
+            idle_color = QColor(node.definition["color"])
+        else:
+            idle_color = QColor("#53627a")
+
+        if state == "active":
+            color = QColor("#f0b429")
+            width = 4.0
+        elif state == "done":
+            color = QColor("#55c98b")
+            width = 3.0
+        else:
+            color = idle_color
+            width = 2.5 if isinstance(node, PluginItem) else 1.5
+
+        node.setPen(QPen(color, width))
+
+        if hasattr(node, "activation_label") and not isinstance(node, FixedEndpointItem):
+            if state == "active":
+                node.activation_label.setText(f"Activation: {node.activation_order} • RUNNING")
+                node.activation_label.setBrush(QBrush(QColor("#f0b429")))
+            elif state == "done":
+                node.activation_label.setText(f"Activation: {node.activation_order} ✓")
+                node.activation_label.setBrush(QBrush(QColor("#55c98b")))
+            else:
+                node.set_activation_order(node.activation_order)
+
+            if isinstance(node, PluginItem):
+                node.activation_label.setPos(
+                    (node.diameter - node.activation_label.boundingRect().width()) / 2,
+                    38,
+                )
+
+    def reset_execution_visuals(self):
+        for transfer in self.completed_transfers():
+            transfer.set_flow_state("idle", 0.0)
+        for node in self.all_nodes():
+            self.set_node_execution_visual(node, "idle")
+
+    def execution_animation_plan(self):
+        orders, has_cycle = self.execution_orders()
+        if has_cycle:
+            return []
+
+        plan = []
+        if self.dataset_block:
+            plan.append({
+                "kind": "nodes",
+                "label": "Dataset ready",
+                "nodes": [self.dataset_block],
+            })
+            dataset_edges = self.outgoing_transfers(self.dataset_block)
+            if dataset_edges:
+                plan.append({
+                    "kind": "transfers",
+                    "label": "Transfer dataset inputs",
+                    "transfers": dataset_edges,
+                })
+
+        grouped = {}
+        for node, order in orders.items():
+            grouped.setdefault(order, []).append(node)
+
+        for order in sorted(grouped):
+            nodes = sorted(grouped[order], key=lambda n: n.node_id)
+            plan.append({
+                "kind": "nodes",
+                "label": f"Activation {order}",
+                "nodes": nodes,
+            })
+
+            outgoing = []
+            seen = set()
+            for node in nodes:
+                for transfer in self.outgoing_transfers(node):
+                    if transfer not in seen:
+                        seen.add(transfer)
+                        outgoing.append(transfer)
+
+            if outgoing:
+                plan.append({
+                    "kind": "transfers",
+                    "label": f"Transfer outputs from activation {order}",
+                    "transfers": outgoing,
+                })
+
+        if self.output_block and self.incoming_transfers(self.output_block):
+            plan.append({
+                "kind": "nodes",
+                "label": "Pipeline output reached",
+                "nodes": [self.output_block],
+            })
+
+        return plan
+
     def validate_graph(self):
         errors = []
         warnings = []
@@ -1068,6 +1200,13 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.live_code_dialogs = []
 
+        self.flow_timer = QTimer(self)
+        self.flow_timer.setInterval(40)
+        self.flow_timer.timeout.connect(self._flow_animation_tick)
+        self.flow_plan = []
+        self.flow_phase_index = -1
+        self.flow_tick = 0
+
         dock = QDockWidget("Pipeline Library", self)
         self.library = LibraryPanel(self)
         dock.setWidget(self.library)
@@ -1090,6 +1229,14 @@ class MainWindow(QMainWindow):
         validate.triggered.connect(self.show_validation)
         toolbar.addAction(validate)
 
+        animate = QAction("▶ Animate Flow", self)
+        animate.triggered.connect(self.start_flow_animation)
+        toolbar.addAction(animate)
+
+        stop_animation = QAction("■ Stop Flow", self)
+        stop_animation.triggered.connect(self.stop_flow_animation)
+        toolbar.addAction(stop_animation)
+
         toolbar.addSeparator()
 
         explain = QAction("Explain relationships", self)
@@ -1109,7 +1256,8 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(
             "Gray arrows transfer data only. Rectangles are models. Circles are plugins. "
-            "? = optional input, * = multiple connections. Activation order is dependency-derived."
+            "? = optional input, * = multiple connections. Activation order is dependency-derived. "
+            "Use Animate Flow to preview execution from dataset to output."
         )
 
     def build_fixed_endpoints(self):
@@ -1144,6 +1292,7 @@ class MainWindow(QMainWindow):
         self.scene.output_block.setPos(610, -205)
 
     def clear_pipeline(self):
+        self.stop_flow_animation()
         self.scene.cancel_pending()
         for item in list(self.scene.items()):
             if isinstance(item, TransferItem):
@@ -1153,6 +1302,95 @@ class MainWindow(QMainWindow):
             elif isinstance(item, ModelItem) and not isinstance(item, FixedEndpointItem):
                 self.scene.removeItem(item)
         self.scene.refresh_graph_state()
+
+    def start_flow_animation(self):
+        errors, warnings, _ = self.scene.validate_graph()
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Cannot animate invalid graph",
+                "Fix the structural errors before running the flow animation.\n\n"
+                + "\n".join(f"• {item}" for item in errors),
+            )
+            return
+
+        self.stop_flow_animation()
+        self.scene.refresh_graph_state()
+        self.scene.reset_execution_visuals()
+
+        self.flow_plan = self.scene.execution_animation_plan()
+        if not self.flow_plan:
+            self.statusBar().showMessage("There is no executable flow to animate.", 5000)
+            return
+
+        self.flow_phase_index = 0
+        self.flow_tick = 0
+        self._begin_flow_phase()
+        self.flow_timer.start()
+
+    def stop_flow_animation(self):
+        if self.flow_timer.isActive():
+            self.flow_timer.stop()
+        self.flow_plan = []
+        self.flow_phase_index = -1
+        self.flow_tick = 0
+        if hasattr(self, "scene"):
+            self.scene.reset_execution_visuals()
+        self.statusBar().showMessage("Flow animation stopped.", 3000)
+
+    def _begin_flow_phase(self):
+        if self.flow_phase_index < 0 or self.flow_phase_index >= len(self.flow_plan):
+            return
+
+        phase = self.flow_plan[self.flow_phase_index]
+        self.flow_tick = 0
+        self.statusBar().showMessage(f"Flow: {phase['label']}")
+
+        if phase["kind"] == "nodes":
+            for node in phase["nodes"]:
+                self.scene.set_node_execution_visual(node, "active")
+        else:
+            for transfer in phase["transfers"]:
+                transfer.set_flow_state("active", 0.0)
+
+    def _finish_flow_phase(self):
+        phase = self.flow_plan[self.flow_phase_index]
+
+        if phase["kind"] == "nodes":
+            for node in phase["nodes"]:
+                self.scene.set_node_execution_visual(node, "done")
+        else:
+            for transfer in phase["transfers"]:
+                transfer.set_flow_state("done", 1.0)
+
+        self.flow_phase_index += 1
+        if self.flow_phase_index >= len(self.flow_plan):
+            self.flow_timer.stop()
+            self.statusBar().showMessage("Flow animation complete — pipeline output reached.", 7000)
+            return
+
+        self._begin_flow_phase()
+
+    def _flow_animation_tick(self):
+        if self.flow_phase_index < 0 or self.flow_phase_index >= len(self.flow_plan):
+            self.flow_timer.stop()
+            return
+
+        phase = self.flow_plan[self.flow_phase_index]
+        self.flow_tick += 1
+
+        if phase["kind"] == "transfers":
+            duration_ticks = 28
+            progress = min(1.0, self.flow_tick / duration_ticks)
+            for transfer in phase["transfers"]:
+                transfer.set_flow_state("active", progress)
+
+            if progress >= 1.0:
+                self._finish_flow_phase()
+        else:
+            duration_ticks = 18
+            if self.flow_tick >= duration_ticks:
+                self._finish_flow_phase()
 
     def add_named_model(self, definition):
         center = self.view.mapToScene(self.view.viewport().rect().center())
