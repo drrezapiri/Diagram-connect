@@ -2,6 +2,8 @@ import sys
 import json
 import math
 
+from model_registry import ModelImportDialog, ModelRegistry
+
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QAction, QBrush, QColor, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (
@@ -1096,11 +1098,17 @@ class LibraryPanel(QWidget):
         layout.addWidget(self.models)
         for definition in DEFAULT_MODELS:
             self.add_model_item(definition)
+        for definition in window.model_registry.model_definitions():
+            self.add_model_item(definition, imported=True)
         self.models.itemDoubleClicked.connect(self.place_model)
 
         button = QPushButton("+ Define model")
         button.clicked.connect(self.define_model)
         layout.addWidget(button)
+
+        import_button = QPushButton("Import .pth / .pt model")
+        import_button.clicked.connect(self.import_model)
+        layout.addWidget(import_button)
 
         layout.addWidget(
             QLabel(
@@ -1128,11 +1136,17 @@ class LibraryPanel(QWidget):
         outs = ", ".join(port_label(p, False) for p in d["outputs"]) or "—"
         return f"{ins} → {outs}"
 
-    def add_model_item(self, definition):
+    def add_model_item(self, definition, imported=False):
         definition = normalize_definition(definition)
         self.model_defs.append(definition)
-        item = QListWidgetItem(f"{definition['name']}   [{self.definition_summary(definition)}]")
+        prefix = "◆ " if imported or definition.get("model_package") else ""
+        item = QListWidgetItem(
+            f"{prefix}{definition['name']}   [{self.definition_summary(definition)}]"
+        )
         item.setData(Qt.UserRole, len(self.model_defs) - 1)
+        if imported or definition.get("model_package"):
+            item.setToolTip("Imported AI model package")
+            item.setForeground(QColor("#7cc4ff"))
         self.models.addItem(item)
 
     def add_plugin_item(self, definition):
@@ -1161,6 +1175,20 @@ class LibraryPanel(QWidget):
                     "outputs": parse_port_text(dialog.value("outputs"), "output"),
                 }
             )
+
+    def import_model(self):
+        dialog = ModelImportDialog(self)
+        if not dialog.exec():
+            return
+
+        manifest = self.window.model_registry.register(dialog.manifest())
+        definition = self.window.model_registry.to_graph_definition(manifest)
+        self.add_model_item(definition, imported=True)
+
+        self.window.statusBar().showMessage(
+            f"Imported model '{manifest['name']}' into the local Model Registry.",
+            7000,
+        )
 
     def define_plugin(self):
         dialog = DefinitionDialog(
@@ -1195,6 +1223,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Diagram Connect — AI Graph Execution Mock-up")
         self.resize(1450, 860)
 
+        self.model_registry = ModelRegistry()
+
         self.scene = PipelineScene(self)
         self.view = PipelineView(self.scene)
         self.setCentralWidget(self.view)
@@ -1224,6 +1254,10 @@ class MainWindow(QMainWindow):
         clear = QAction("Clear canvas", self)
         clear.triggered.connect(self.clear_pipeline)
         toolbar.addAction(clear)
+
+        import_model = QAction("Import AI Model", self)
+        import_model.triggered.connect(self.library.import_model)
+        toolbar.addAction(import_model)
 
         validate = QAction("Validate / Execution", self)
         validate.triggered.connect(self.show_validation)
@@ -1257,7 +1291,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             "Gray arrows transfer data only. Rectangles are models. Circles are plugins. "
             "? = optional input, * = multiple connections. Activation order is dependency-derived. "
-            "Use Animate Flow to preview execution from dataset to output."
+            "Use Import AI Model to register .pth/.pt/.ckpt artifacts, then place them like any model."
         )
 
     def build_fixed_endpoints(self):
